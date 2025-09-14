@@ -22,7 +22,7 @@ A comprehensive Node.js application that calculates calorie burn for cycling act
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/cycling-calorie-calculator.git
+git clone https://github.com/HaikuZen/cycling-calories-calculator.git
 cd cycling-calorie-calculator
 ```
 
