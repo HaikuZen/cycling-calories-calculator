@@ -6,7 +6,19 @@
   "scripts": {
     "start": "node index.js",
     "test": "node test/test.js",
-    "example": "node examples/example.js"
+    "example": "node examples/example.js",
+    "test-config": "node test_config.js",
+    "test-args": "node test_new_args.js",
+    "init-db": "node init-db.js",
+    "init-db:force": "node init-db.js --force --verbose",
+    "create-db": "powershell -ExecutionPolicy Bypass -File create-db.ps1",
+    "create-db:force": "powershell -ExecutionPolicy Bypass -File create-db.ps1 -Force",
+    "create-db:bash": "bash create-db.sh",
+    "weather-api": "node manage-weather-api.js",
+    "weather-api:get": "node manage-weather-api.js get",
+    "weather-api:check": "node manage-weather-api.js check",
+    "weather-api:bash": "bash manage-weather-api.sh",
+    "config:bash": "bash manage-config.sh"
   },
   "keywords": [
     "cycling",
@@ -21,6 +33,7 @@
   "license": "MIT",
   "dependencies": {
     "axios": "^1.6.0",
+    "sqlite3": "^5.1.7",
     "xml2js": "^0.6.2"
   },
   "devDependencies": {
@@ -31,10 +44,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/yourusername/cycling-calorie-calculator.git"
+    "url": "https://github.com/HaikuZen/cycling-calorie-calculator.git"
   },
   "bugs": {
-    "url": "https://github.com/yourusername/cycling-calorie-calculator/issues"
+    "url": "https://github.com/HaikuZen/cycling-calorie-calculator/issues"
   },
-  "homepage": "https://github.com/yourusername/cycling-calorie-calculator#readme"
+  "homepage": "https://github.com/HaikuZen/cycling-calorie-calculator#readme"
 }

@@ -3,6 +3,7 @@ const fs = require('fs').promises;
 const path = require('path');
 const axios = require('axios');
 const xml2js = require('xml2js');
+const CyclingDatabase = require('./database');
 
 class CyclingCalorieCalculator {
     constructor(config = {}) {
@@ -12,10 +13,59 @@ class CyclingCalorieCalculator {
             weatherApiUrl: config.weatherApiUrl || 'http://api.openweathermap.org/data/2.5/weather',
             weatherHistoricalApiUrl: config.weatherHistoricalApiUrl || 'http://api.openweathermap.org/data/3.0/onecall/timemachine',
             gpxzApiUrl: config.gpxzApiUrl || 'https://api.gpxz.io/v1/elevation/point',
+            saveToDatabase: config.saveToDatabase !== false, // Default to true
+            databasePath: config.databasePath || './cycling_data.db',
             ...config
         };
+        
+        // Initialize database if saving is enabled
+        this.database = null;
+        if (this.config.saveToDatabase) {
+            this.database = new CyclingDatabase(this.config.databasePath);
+        }
+        
+        // Flag to track if we need to load config from database
+        this.configLoaded = false;
     }
 
+    /**
+     * Load configuration from database
+     */
+    async loadDatabaseConfig() {
+        if (this.configLoaded || !this.database) {
+            return;
+        }
+        
+        try {
+            await this.database.initialize();
+            
+            // Load weather API configuration if not already set
+            if (!this.config.weatherApiKey) {
+                const dbWeatherApiKey = await this.database.getConfig('weather_api_key');
+                if (dbWeatherApiKey) {
+                    this.config.weatherApiKey = dbWeatherApiKey;
+                    console.log('🔑 Loaded weather API key from database');
+                }
+            }
+            
+            // Load weather API URL if not already set
+            if (!this.config.weatherApiUrl || this.config.weatherApiUrl === 'http://api.openweathermap.org/data/2.5/weather') {
+                const dbWeatherApiUrl = await this.database.getConfig('weather_api_base_url');
+                if (dbWeatherApiUrl) {
+                    this.config.weatherApiUrl = dbWeatherApiUrl + '/weather';
+                    this.config.weatherHistoricalApiUrl = dbWeatherApiUrl.replace('/data/2.5', '/data/3.0') + '/onecall/timemachine';
+                }
+            }
+            
+            this.configLoaded = true;
+            
+        } catch (error) {
+            console.warn('⚠️  Failed to load configuration from database:', error.message);
+        } finally {
+            await this.database.close();
+        }
+    }
+    
     /**
      * Main calculation function
      * @param {Object} params - Calculation parameters
@@ -26,6 +76,9 @@ class CyclingCalorieCalculator {
     async calculateCalorieBurn(params) {
         try {
             console.log('🚴 Starting elevation-adjusted calorie burn calculation...');
+            
+            // Load configuration from database if available
+            await this.loadDatabaseConfig();
             
             // Step 1: Parse GPX file
             const gpxData = await this.parseGpxFile(params.gpxFilePath);
@@ -54,13 +107,32 @@ class CyclingCalorieCalculator {
                 weather: weatherData
             });
             
-            return {
+            const result = {
                 summary: calorieData,
                 gpxData: enhancedGpxData,
                 weatherData,
                 breakdown: this.getCalorieBreakdown(calorieData),
                 location: gpxData.startLocation
             };
+            
+            // Save to database if enabled
+            if (this.database) {
+                try {
+                    await this.database.initialize();
+                    const rideId = await this.database.saveRide(
+                        result, 
+                        path.basename(params.gpxFilePath),
+                        params.weight
+                    );
+                    result.rideId = rideId;
+                } catch (dbError) {
+                    console.warn('⚠️  Failed to save to database:', dbError.message);
+                } finally {
+                    await this.database.close();
+                }
+            }
+            
+            return result;
             
         } catch (error) {
             console.error('❌ Error calculating calories:', error.message);
@@ -502,40 +574,177 @@ class CyclingCalorieCalculator {
         
         return breakdown.filter(item => Math.abs(item.calories) > 1);
     }
+
+    /**
+     * Get historical ride data from database
+     */
+    async getHistoricalRides(limit = 10) {
+        if (!this.database) {
+            throw new Error('Database not enabled. Set saveToDatabase to true in config.');
+        }
+
+        await this.database.initialize();
+        try {
+            return await this.database.getAllRides(limit);
+        } finally {
+            await this.database.close();
+        }
+    }
+
+    /**
+     * Get ride statistics from database
+     */
+    async getRideStatistics() {
+        if (!this.database) {
+            throw new Error('Database not enabled. Set saveToDatabase to true in config.');
+        }
+
+        await this.database.initialize();
+        try {
+            return await this.database.getRideStatistics();
+        } finally {
+            await this.database.close();
+        }
+    }
+
+    /**
+     * Export data to JSON
+     */
+    async exportData(outputPath) {
+        if (!this.database) {
+            throw new Error('Database not enabled. Set saveToDatabase to true in config.');
+        }
+
+        await this.database.initialize();
+        try {
+            return await this.database.exportToJSON(outputPath);
+        } finally {
+            await this.database.close();
+        }
+    }
+
+    /**
+     * Get rides within a date range
+     */
+    async getRidesByDateRange(startDate, endDate, limit = null) {
+        if (!this.database) {
+            throw new Error('Database not enabled. Set saveToDatabase to true in config.');
+        }
+
+        await this.database.initialize();
+        try {
+            return await this.database.getRidesByDateRange(startDate, endDate, limit);
+        } finally {
+            await this.database.close();
+        }
+    }
+    
+    /**
+     * Get default rider weight from database configuration
+     */
+    async getDefaultRiderWeight() {
+        if (!this.database) {
+            return 70; // Default fallback weight
+        }
+
+        await this.database.initialize();
+        try {
+            return await this.database.getConfig('default_rider_weight', 70);
+        } finally {
+            await this.database.close();
+        }
+    }
 }
 
 // CLI interface
 async function main() {
     const args = process.argv.slice(2);
     
-    if (args.length < 2) {
-        console.log(`
-🚴 Elevation-Adjusted Cycling Calorie Calculator
-
-Usage: node index.js <weight_kg> <gpx_file_path>
-
-Example: node index.js 70 ./ride.gpx
-
-The calculator will automatically extract coordinates from the first trackpoint
-in the GPX file for weather data lookup.
-
-Environment Variables:
-- GPXZ_API_KEY: Your GPXZ.io API key for elevation enhancement
-- WEATHER_API_KEY: Your OpenWeatherMap API key for weather data
-
-Get your free GPXZ API key at: https://gpxz.io
-Get your free weather API key at: https://openweathermap.org/api
-        `);
+    // Handle database commands
+    if (args.length > 0 && args[0].startsWith('--')) {
+        const command = args[0];
+        const calculator = new CyclingCalorieCalculator();
+        
+        try {
+            switch (command) {
+                case '--history':
+                    const limit = args[1] ? parseInt(args[1]) : 10;
+                    await showHistory(calculator, limit);
+                    break;
+                    
+                case '--stats':
+                    await showStatistics(calculator);
+                    break;
+                    
+                case '--export':
+                    const exportPath = args[1] || './cycling_data_export.json';
+                    await calculator.exportData(exportPath);
+                    break;
+                    
+                case '--help':
+                    showHelp();
+                    break;
+                    
+                default:
+                    console.error('❌ Unknown command:', command);
+                    showHelp();
+                    process.exit(1);
+            }
+        } catch (error) {
+            console.error('❌ Error:', error.message);
+            process.exit(1);
+        }
+        return;
+    }
+    
+    if (args.length < 1) {
+        showHelp();
         process.exit(1);
     }
 
-    const [weight, gpxFilePath] = args;
+    // Parse arguments - support both old and new format
+    let gpxFilePath;
+    let riderId = null;
+    let weight = null;
+    
+    // Check if --rider-id switch is used
+    const riderIdIndex = args.indexOf('--rider-id');
+    if (riderIdIndex !== -1 && riderIdIndex + 1 < args.length) {
+        riderId = args[riderIdIndex + 1];
+        // Remove --rider-id and its value from args for GPX file detection
+        const filteredArgs = args.filter((arg, index) => 
+            index !== riderIdIndex && index !== riderIdIndex + 1
+        );
+        gpxFilePath = filteredArgs[0];
+    } else {
+        // Legacy support: if two arguments and second is not a switch, treat as weight + gpx
+        if (args.length >= 2 && !args[1].startsWith('--') && !isNaN(parseFloat(args[0]))) {
+            console.log('⚠️  Legacy format detected. Consider using: node index.js <gpx_file> [--rider-id <id>]');
+            weight = parseFloat(args[0]);
+            gpxFilePath = args[1];
+        } else {
+            gpxFilePath = args[0];
+        }
+    }
     
     const calculator = new CyclingCalorieCalculator();
     
     try {
+        // Get weight from database if not provided (legacy format)
+        if (weight === null) {
+            weight = await calculator.getDefaultRiderWeight();
+            
+            if (riderId) {
+                console.log(`📋 Using rider ID: ${riderId}`);
+                // TODO: In future, could look up rider-specific weight by ID
+                console.log(`⚖️  Using default weight: ${weight}kg (rider-specific weights not yet implemented)`);
+            } else {
+                console.log(`⚖️  Using default weight from database: ${weight}kg`);
+            }
+        }
+        
         const result = await calculator.calculateCalorieBurn({
-            weight: parseFloat(weight),
+            weight: weight,
             gpxFilePath
         });
         
@@ -577,13 +786,114 @@ Get your free weather API key at: https://openweathermap.org/api
         if (result.gpxData.elevationEnhanced) {
             console.log('\n✅ Elevation data enhanced with GPXZ');
         } else {
-            console.log('\n⚠️  Using original GPX elevation data');
+            console.log('\u26a0\ufe0f  Using original GPX elevation data');
+        }
+        
+        // Show database save status
+        if (result.rideId) {
+            console.log(`\n💾 DATA SAVED`);
+            console.log('==========');
+            console.log(`Ride ID: ${result.rideId}`);
+            console.log('Data has been saved to the database.');
+            console.log('Use --history to view past rides or --stats for statistics.');
         }
         
     } catch (error) {
         console.error('❌ Error:', error.message);
         process.exit(1);
     }
+}
+
+// Helper functions for CLI commands
+async function showHistory(calculator, limit) {
+    console.log(`\n📊 RIDE HISTORY (Last ${limit} rides)`);
+    console.log('='.repeat(50));
+    
+    const rides = await calculator.getHistoricalRides(limit);
+    
+    if (rides.length === 0) {
+        console.log('No rides found in database.');
+        return;
+    }
+    
+    rides.forEach((ride, index) => {
+        const rideDate = ride.ride_date ? new Date(ride.ride_date).toLocaleDateString() : 'Unknown';
+        console.log(`\n${index + 1}. Ride #${ride.id} - ${rideDate}`);
+        console.log(`   File: ${ride.gpx_filename || 'Unknown'}`);
+        console.log(`   Distance: ${ride.distance}km, Duration: ${ride.duration}min`);
+        console.log(`   Calories: ${ride.total_calories} kcal (${ride.calories_per_km} kcal/km)`);
+        console.log(`   Elevation: ${ride.elevation_gain}m, Speed: ${ride.average_speed}km/h`);
+        console.log(`   Weight: ${ride.rider_weight}kg`);
+    });
+}
+
+async function showStatistics(calculator) {
+    console.log(`\n📈 RIDING STATISTICS`);
+    console.log('='.repeat(30));
+    
+    const stats = await calculator.getRideStatistics();
+    
+    if (!stats || stats.total_rides === 0) {
+        console.log('No ride data available.');
+        return;
+    }
+    
+    console.log(`Total Rides: ${stats.total_rides}`);
+    console.log(`Total Distance: ${stats.total_distance?.toFixed(1)} km`);
+    console.log(`Total Duration: ${(stats.total_duration / 60)?.toFixed(1)} hours`);
+    console.log(`Total Elevation Gain: ${stats.total_elevation_gain?.toFixed(0)} m`);
+    console.log(`Total Calories Burned: ${stats.total_calories?.toFixed(0)} kcal`);
+    console.log(`Average Speed: ${stats.avg_speed?.toFixed(1)} km/h`);
+    console.log(`Average Calories/km: ${stats.avg_calories_per_km?.toFixed(0)} kcal/km`);
+    
+    if (stats.first_ride) {
+        console.log(`First Ride: ${new Date(stats.first_ride).toLocaleDateString()}`);
+    }
+    if (stats.last_ride) {
+        console.log(`Last Ride: ${new Date(stats.last_ride).toLocaleDateString()}`);
+    }
+}
+
+function showHelp() {
+    console.log(`
+🚴 Elevation-Adjusted Cycling Calorie Calculator
+
+Usage: 
+  Calculate calories: node index.js <gpx_file_path> [--rider-id <id>]
+  View history:      node index.js --history [limit]
+  Show statistics:   node index.js --stats
+  Export data:       node index.js --export [output_file]
+  Show this help:    node index.js --help
+
+Examples:
+  node index.js ./ride.gpx                    # Use default weight from database
+  node index.js ./ride.gpx --rider-id john    # Use rider ID (weight from config)
+  node index.js --history 20                  # Show last 20 rides
+  node index.js --stats                       # Show riding statistics
+  node index.js --export data.json            # Export all data to JSON
+  
+  # Legacy format (still supported):
+  node index.js 70 ./ride.gpx                 # Specify weight directly
+
+Configuration:
+  The rider weight is retrieved from the database configuration (default_rider_weight).
+  You can update it using: node manage-weather-api.js or configuration management tools.
+
+The calculator automatically saves results to a SQLite database (cycling_data.db).
+Coordinates are extracted from the GPX file for weather data lookup.
+
+API Keys (Environment Variables or Database Config):
+- GPXZ_API_KEY: Your GPXZ.io API key for elevation enhancement
+- WEATHER_API_KEY: Your OpenWeatherMap API key for weather data
+
+Get your free GPXZ API key at: https://gpxz.io
+Get your free weather API key at: https://openweathermap.org/api
+
+Database Management:
+- Use 'create-db.bat' (Windows) or './create-db.sh' (Linux/macOS) to create database
+- Use 'node manage-weather-api.js' to configure weather API keys
+- Use './manage-config.sh' (Linux/macOS) to manage all configuration settings
+    `);
 }
 
 // Export for use as module
